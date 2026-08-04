@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#12b6a4" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Doodle Telephone — Draw, Guess, Laugh</title>
+  <meta name="description" content="Write a sentence, someone draws it, someone else guesses the drawing… then watch the chain fall apart. A party game for 3–8 friends. No sign-up, plays in your browser." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎨</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <div class="bg"><span class="blob b1"></span><span class="blob b2"></span><span class="blob b3"></span></div>
+
+  <!-- ============ HOME ============ -->
+  <section class="screen is-active" id="screen-home">
+    <div class="hero">
+      <h1 class="logo">🎨 Doodle<span>Telephone</span></h1>
+      <p class="tagline">Write a sentence. Someone draws it. Someone else guesses the drawing. Repeat… then watch it all fall apart together.</p>
+
+      <div class="mode-grid">
+        <button class="mode-card" data-mode="pass">
+          <span class="mode-emoji">📱</span>
+          <span class="mode-title">Pass &amp; Play</span>
+          <span class="mode-sub">One device, pass it around</span>
+        </button>
+        <button class="mode-card" data-mode="host">
+          <span class="mode-emoji">🎉</span>
+          <span class="mode-title">Create Room</span>
+          <span class="mode-sub">Everyone on their own phone</span>
+        </button>
+        <button class="mode-card" data-mode="join">
+          <span class="mode-emoji">🔑</span>
+          <span class="mode-title">Join Room</span>
+          <span class="mode-sub">Enter a friend's code</span>
+        </button>
+      </div>
+
+      <div class="panel" id="panel-pass" hidden>
+        <h2>Pass &amp; Play</h2>
+        <label class="field"><span>How many players?</span>
+          <div class="count-row" id="count-row">
+            <button data-n="3">3</button><button data-n="4" class="on">4</button>
+            <button data-n="5">5</button><button data-n="6">6</button>
+            <button data-n="7">7</button><button data-n="8">8</button>
+          </div>
+        </label>
+        <div id="pass-names" class="names"></div>
+        <button class="btn btn-primary" id="pass-start">Start drawing →</button>
+        <button class="btn btn-ghost" data-back>← Back</button>
+      </div>
+
+      <div class="panel" id="panel-host" hidden>
+        <h2>Create a room</h2>
+        <label class="field"><span>Your name</span><input id="host-name" maxlength="12" placeholder="e.g. Alex" /></label>
+        <button class="btn btn-primary" id="host-create">Create room →</button>
+        <button class="btn btn-ghost" data-back>← Back</button>
+      </div>
+
+      <div class="panel" id="panel-join" hidden>
+        <h2>Join a room</h2>
+        <label class="field"><span>Your name</span><input id="join-name" maxlength="12" placeholder="e.g. Sam" /></label>
+        <label class="field"><span>Room code</span><input id="join-code" maxlength="4" placeholder="ABCD" class="code-in" /></label>
+        <button class="btn btn-primary" id="join-go">Join →</button>
+        <button class="btn btn-ghost" data-back>← Back</button>
+        <p class="err" id="join-err"></p>
+      </div>
+    </div>
+    <footer class="foot">3–8 players · No sign-up · Peer-to-peer, runs in your browser</footer>
+  </section>
+
+  <!-- ============ LOBBY ============ -->
+  <section class="screen" id="screen-lobby">
+    <div class="card">
+      <h2>Waiting room</h2>
+      <div class="code-box">
+        <span class="code-label">Room code</span>
+        <div class="code-big" id="lobby-code">----</div>
+        <button class="btn btn-ghost small" id="copy-code">Copy</button>
+      </div>
+      <ul class="players" id="lobby-players"></ul>
+      <p class="hint" id="lobby-hint"></p>
+      <button class="btn btn-primary" id="lobby-start" hidden>Start game →</button>
+      <button class="btn btn-ghost" id="lobby-leave">Leave</button>
+    </div>
+  </section>
+
+  <!-- ============ HANDOFF (pass & play) ============ -->
+  <section class="screen" id="screen-handoff">
+    <div class="card handoff">
+      <div class="handoff-emoji">🙈</div>
+      <h2>Pass the device to</h2>
+      <div class="handoff-name" id="handoff-name">Player 2</div>
+      <p class="hint">No peeking, everyone else!</p>
+      <button class="btn btn-primary" id="handoff-ready">I'm ready →</button>
+    </div>
+  </section>
+
+  <!-- ============ TASK ============ -->
+  <section class="screen" id="screen-task">
+    <div class="task">
+      <header class="task-head">
+        <div>
+          <div class="task-title" id="task-title">Write a sentence</div>
+          <div class="task-sub" id="task-sub">Round 1 of 4</div>
+        </div>
+        <div class="timer" id="timer">1:00</div>
+      </header>
+      <div class="timer-bar"><i id="timer-fill"></i></div>
+
+      <!-- what you're responding to -->
+      <div class="prior" id="prior-text" hidden>
+        <span class="prior-label">Draw this:</span>
+        <p id="prior-text-value"></p>
+      </div>
+      <div class="prior prior-draw" id="prior-draw" hidden>
+        <span class="prior-label">What is this?</span>
+        <canvas id="prior-canvas"></canvas>
+      </div>
+
+      <!-- your answer -->
+      <div class="answer-text" id="answer-text" hidden>
+        <input id="text-input" maxlength="70" placeholder="Type your sentence…" autocomplete="off" />
+        <button class="btn btn-ghost small" id="surprise">🎲 Surprise me</button>
+      </div>
+
+      <div class="answer-draw" id="answer-draw" hidden>
+        <div class="pad-wrap"><canvas id="pad"></canvas></div>
+        <div class="tools">
+          <div class="swatches" id="swatches"></div>
+          <div class="tool-row">
+            <div class="brushes" id="brushes"></div>
+            <button class="tool-btn" id="tool-eraser" title="Eraser">🧽</button>
+            <button class="tool-btn" id="tool-undo" title="Undo">↩︎</button>
+            <button class="tool-btn" id="tool-clear" title="Clear">🗑️</button>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="submit-btn">Done →</button>
+    </div>
+  </section>
+
+  <!-- ============ WAITING ============ -->
+  <section class="screen" id="screen-waiting">
+    <div class="card">
+      <div class="spinner"></div>
+      <h2>Nice one!</h2>
+      <p class="hint" id="waiting-text">Waiting for everyone else to finish…</p>
+      <div class="progress"><i id="waiting-fill"></i></div>
+      <ul class="players" id="waiting-players"></ul>
+    </div>
+  </section>
+
+  <!-- ============ REVEAL ============ -->
+  <section class="screen" id="screen-reveal">
+    <div class="reveal">
+      <header class="reveal-head">
+        <div>
+          <div class="task-title" id="reveal-title">Chain 1</div>
+          <div class="task-sub" id="reveal-sub">started by Alex</div>
+        </div>
+        <button class="btn btn-ghost small" id="reveal-leave">Leave</button>
+      </header>
+
+      <div class="reveal-stage">
+        <div class="reveal-by" id="reveal-by"></div>
+        <div class="reveal-text" id="reveal-text" hidden></div>
+        <div class="reveal-draw" id="reveal-draw" hidden><canvas id="reveal-canvas"></canvas></div>
+      </div>
+
+      <div class="dots" id="reveal-dots"></div>
+      <button class="btn btn-primary" id="reveal-next">Next →</button>
+      <p class="hint" id="reveal-wait" hidden>Waiting for the host…</p>
+    </div>
+  </section>
+
+  <!-- ============ VOTE ============ -->
+  <section class="screen" id="screen-vote">
+    <div class="card">
+      <h2>🏆 Favourite chain?</h2>
+      <p class="hint">Vote for the one that broke you.</p>
+      <ul class="vote-list" id="vote-list"></ul>
+      <p class="hint" id="vote-status"></p>
+    </div>
+  </section>
+
+  <!-- ============ DONE ============ -->
+  <section class="screen" id="screen-done">
+    <div class="card">
+      <div class="confetti" id="confetti"></div>
+      <div class="trophy">🏆</div>
+      <h2 id="done-title">Best chain!</h2>
+      <p id="done-sub" class="hint"></p>
+      <button class="btn btn-primary" id="done-replay">Watch chains again</button>
+      <button class="btn btn-ghost" id="done-again" hidden>Play again →</button>
+      <button class="btn btn-ghost" id="done-home">Back home</button>
+    </div>
+  </section>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -43,6 +43,17 @@ body {
 .screen.is-active { display: flex; }
 .hero, .card, .task, .reveal { margin: auto; }
 
+/* ---------- CONNECTION BANNER ---------- */
+.netbar {
+  position: fixed; z-index: 3; left: 12px; right: 12px; margin-inline: auto;
+  top: max(8px, env(safe-area-inset-top));
+  width: fit-content; max-width: min(460px, calc(100% - 24px));
+  padding: 9px 16px; border-radius: 999px;
+  background: #241b4a; color: #fff; font-size: 13px; font-weight: 600;
+  text-align: center; box-shadow: var(--shadow);
+  animation: rise 0.3s ease;
+}
+
 /* ---------- HOME ---------- */
 .hero { width: min(760px, 100%); text-align: center; }
 .logo {

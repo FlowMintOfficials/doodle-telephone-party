@@ -17,6 +17,7 @@ const clone = (x) => JSON.parse(JSON.stringify(x));
 
 const TEXT_MS = 45000;
 const DRAW_MS = 75000;
+const DROP_GRACE_MS = 8000; // let a dropped player reconnect before answering for them
 
 const G = {
   mode: null,           // 'pass' | 'host' | 'client'
@@ -27,13 +28,32 @@ const G = {
   hostPlayers: [], peerIndex: new Map(), started: false,
   passPos: 0,
   curTask: null,
-  tick: null, stepTimer: null,
+  tick: null, stepTimer: null, stepEndsAt: 0, dropTimers: new Map(),
   album: null, reveal: { chain: 0, entry: 0 },
   voted: null,
 };
 
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('is-active', s.id === id));
+}
+
+/** Banner for the signaling link, which can drop without the game noticing. */
+function setNetStatus(status) {
+  const bar = $('#netbar');
+  bar.hidden = status !== 'reconnecting';
+  bar.textContent = G.mode === 'host'
+    ? '⚠️ Reconnecting… nobody can join with the code until this clears'
+    : '⚠️ Connection lost — reconnecting…';
+}
+
+/**
+ * A per-tab identity that survives a reload, so a player who drops out gets
+ * their own seat back instead of turning up as a stranger.
+ */
+function myPid() {
+  let pid = sessionStorage.getItem('dt-pid');
+  if (!pid) { pid = Math.random().toString(36).slice(2, 10); sessionStorage.setItem('dt-pid', pid); }
+  return pid;
 }
 
 // ---- HOME -----------------------------------------------------------------
@@ -91,7 +111,7 @@ $('#host-create').addEventListener('click', async () => {
   G.hostPlayers = [{ id: 'host', name }];
   G.peerIndex = new Map();
   try {
-    G.host = await createHost({ onMessage: hostOnMessage, onLeave: hostOnLeave });
+    G.host = await createHost({ onMessage: hostOnMessage, onLeave: hostOnLeave, onStatus: setNetStatus });
     showLobby(G.host.code, true);
   } catch {
     alert('Could not create a room. Please try again.');
@@ -101,11 +121,13 @@ $('#host-create').addEventListener('click', async () => {
 function hostOnMessage(peerId, data) {
   if (!data || typeof data !== 'object') return;
   if (data.t === 'join') {
+    const seat = data.pid ? G.hostPlayers.findIndex((p) => p.pid === data.pid) : -1;
+    if (seat > -1) return hostReadmit(peerId, seat);
     if (G.started) return G.host.sendTo(peerId, { t: 'err', m: 'That game already started.' });
     if (G.hostPlayers.length >= MAX_PLAYERS) return G.host.sendTo(peerId, { t: 'err', m: `Room is full (${MAX_PLAYERS} max).` });
     const index = G.hostPlayers.length;
-    G.hostPlayers.push({ id: peerId, name: (data.name || 'Player').slice(0, 12) });
-    G.peerIndex.set(peerId, index);
+    G.hostPlayers.push({ id: peerId, pid: data.pid, name: (data.name || 'Player').slice(0, 12) });
+    reindexPeers();
     G.host.sendTo(peerId, { t: 'welcome', index, code: G.host.code });
     broadcastLobby();
     showLobby(G.host.code, true);
@@ -122,24 +144,75 @@ function hostOnMessage(peerId, data) {
   }
 }
 
+function reindexPeers() {
+  G.peerIndex = new Map();
+  G.hostPlayers.forEach((p, i) => { if (p.id !== 'host') G.peerIndex.set(p.id, i); });
+}
+
+/** A player who dropped is back on a fresh connection: rebind their seat and resync. */
+function hostReadmit(peerId, index) {
+  clearTimeout(G.dropTimers.get(index));
+  G.dropTimers.delete(index);
+  G.hostPlayers[index].id = peerId;
+  reindexPeers();
+  G.host.sendTo(peerId, { t: 'welcome', index, code: G.host.code });
+
+  if (!G.started) {
+    broadcastLobby();
+    showLobby(G.host.code, true);
+    return;
+  }
+
+  const s = G.state;
+  G.host.sendTo(peerId, { t: 'begin', players: s.players, totalSteps: s.totalSteps });
+
+  if (s.phase === 'work') {
+    const chain = chainForPlayer(s, index, s.step);
+    if (s.chains[chain].entries[s.step] === undefined) {
+      G.host.sendTo(peerId, {
+        t: 'task', step: s.step, chain, kind: kindForStep(s.step),
+        ms: Math.max(5000, G.stepEndsAt - Date.now()),
+        prior: priorEntry(s, chain, s.step), total: s.totalSteps,
+      });
+    } else {
+      G.host.sendTo(peerId, { t: 'progress', done: submittedCount(s, s.step), total: s.chains.length });
+    }
+    return;
+  }
+
+  G.host.sendTo(peerId, { t: 'album', album: clone(G.album) });
+  if (s.phase === 'vote') G.host.sendTo(peerId, { t: 'votestart' });
+  else G.host.sendTo(peerId, { t: 'revealAt', ...G.reveal });
+}
+
 function hostOnLeave(peerId) {
   const idx = G.peerIndex.get(peerId);
   if (idx == null) return;
   if (!G.started) {
     G.hostPlayers.splice(idx, 1);
-    G.peerIndex = new Map();
-    G.hostPlayers.forEach((p, i) => { if (p.id !== 'host') G.peerIndex.set(p.id, i); });
+    reindexPeers();
     broadcastLobby();
     showLobby(G.host.code, true);
-  } else if (G.state.phase === 'work') {
-    // Don't stall the round waiting on someone who left.
-    const chain = chainForPlayer(G.state, idx, G.state.step);
-    if (G.state.chains[chain].entries[G.state.step] === undefined) {
+    return;
+  }
+
+  // Don't stall the round waiting on someone who left — but give them a moment
+  // to reconnect first, so a brief blip doesn't cost them their turn.
+  clearTimeout(G.dropTimers.get(idx));
+  G.dropTimers.set(idx, setTimeout(() => {
+    G.dropTimers.delete(idx);
+    if (!G.started || G.hostPlayers[idx]?.id !== peerId) return; // gone, or already back
+    if (G.state.phase === 'work') {
+      const chain = chainForPlayer(G.state, idx, G.state.step);
+      if (G.state.chains[chain].entries[G.state.step] !== undefined) return;
       submitEntry(G.state, chain, G.state.step, kindForStep(G.state.step) === 'text' ? '(player left)' : []);
       hostBroadcastProgress();
       if (stepComplete(G.state, G.state.step)) hostFinishStep();
+    } else if (G.state.phase === 'vote' && G.state.votes[idx] == null) {
+      G.state.votes[idx] = -1; // abstain, so the tally isn't held up forever
+      hostCheckVotes();
     }
-  }
+  }, DROP_GRACE_MS));
 }
 
 function broadcastLobby() { G.host.broadcast({ t: 'lobby', players: lobbyView() }); }
@@ -163,6 +236,7 @@ function hostStartStep() {
   const s = G.state;
   const kind = kindForStep(s.step);
   const ms = kind === 'draw' ? DRAW_MS : TEXT_MS;
+  G.stepEndsAt = Date.now() + ms;
 
   for (let i = 1; i < s.players.length; i++) {
     const chain = chainForPlayer(s, i, s.step);
@@ -210,8 +284,8 @@ $('#join-go').addEventListener('click', async () => {
   $('#join-go').disabled = true;
   G.mode = 'client';
   try {
-    G.client = await createClient(code, { onMessage: clientOnMessage, onClose: onHostGone });
-    G.client.send({ t: 'join', name });
+    G.client = await createClient(code, { onMessage: clientOnMessage, onClose: onLinkLost, onStatus: setNetStatus });
+    G.client.identify({ t: 'join', name, pid: myPid() });
     showLobby(code, false);
   } catch (e) {
     $('#join-err').textContent = e.message || 'Could not join.';
@@ -223,7 +297,10 @@ $('#join-go').addEventListener('click', async () => {
 function clientOnMessage(data) {
   if (!data || typeof data !== 'object') return;
   switch (data.t) {
-    case 'welcome': G.myIndex = data.index; break;
+    case 'welcome':
+      G.myIndex = data.index;
+      if (data.code) $('#lobby-code').textContent = data.code;
+      break;
     case 'lobby': G.lobbyList = data.players; showLobby($('#lobby-code').textContent, false); break;
     case 'begin':
       G.started = true;
@@ -233,7 +310,10 @@ function clientOnMessage(data) {
       G.state.step = data.step;
       showTaskScreen({ step: data.step, chain: data.chain, kind: data.kind, prior: data.prior, total: data.total, ms: data.ms });
       break;
-    case 'progress': updateWaiting(data.done, data.total); break;
+    case 'progress':
+      if (!G.curTask) showWaiting(); // covers rejoining a step we already answered
+      updateWaiting(data.done, data.total);
+      break;
     case 'album': G.album = data.album; break;
     case 'revealAt': G.reveal = { chain: data.chain, entry: data.entry }; renderReveal(); break;
     case 'votestart': showVote(); break;
@@ -242,9 +322,10 @@ function clientOnMessage(data) {
   }
 }
 
-function onHostGone() {
+/** Only fires once net.js has exhausted its reconnect window. */
+function onLinkLost() {
   if (G.state?.phase === 'done') return;
-  alert('The host left — game ended.');
+  alert("Lost the connection to the room and couldn't get back in.");
   goHome();
 }
 
@@ -637,13 +718,16 @@ addEventListener('resize', () => {
 function goHome() {
   stopTimer();
   clearTimeout(G.stepTimer);
+  G.dropTimers.forEach((t) => clearTimeout(t));
   try { G.host?.close(); } catch {}
   try { G.client?.close(); } catch {}
   Object.assign(G, {
     mode: null, state: null, myIndex: null, host: null, client: null,
     hostPlayers: [], peerIndex: new Map(), started: false, passPos: 0,
     curTask: null, album: null, reveal: { chain: 0, entry: 0 }, voted: null, lobbyList: [],
+    stepEndsAt: 0, dropTimers: new Map(),
   });
+  $('#netbar').hidden = true;
   document.querySelectorAll('.panel').forEach((p) => (p.hidden = true));
   showScreen('screen-home');
 }

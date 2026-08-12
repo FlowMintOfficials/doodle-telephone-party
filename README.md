@@ -37,8 +37,9 @@ same chain until the reveal.
 - **Drawing tools** — 10 colours, 4 brush sizes, eraser, undo, and clear.
 - **Timers** with a countdown bar. Run out of time and whatever you have is
   submitted automatically, so nobody can stall the round.
-- **Nobody gets stuck** — if a player disconnects mid-round, the host fills their
-  slot so the game always advances.
+- **Nobody gets stuck** — a player who drops out (locked phone, flaky wifi, even a
+  page reload) reconnects into the same seat and gets the current round back. If
+  they don't make it back in time the host answers for them so the game advances.
 
 ## 📱 Mobile
 
@@ -54,9 +55,13 @@ It uses ES modules, so serve it over HTTP rather than opening the file directly:
 
 ```bash
 cd doodle-telephone
-python -m http.server 8166
+python serve.py 8166
 # open http://127.0.0.1:8166/
 ```
+
+`serve.py` is `http.server` with caching turned off. Plain `python -m http.server`
+works too, but browsers happily keep serving stale copies of the JS modules, so a
+reload can quietly run your *old* code.
 
 ## 🌐 Deploy (GitHub Pages / any static host)
 
@@ -68,6 +73,11 @@ GitHub Pages serves over HTTPS, which is what PeerJS's secure broker needs.
 > ⚠️ Online play uses the **free public PeerJS broker** for signaling. Great for
 > playing with friends, but it's a shared community service with no uptime guarantee,
 > and some strict corporate/school networks block P2P. **Pass & Play always works.**
+>
+> The broker connection drops routinely (locking your phone is enough). The app
+> reconnects on its own and shows a banner while it's down — but while a *host* is
+> disconnected their room code can't be looked up, so nobody new can join until the
+> banner clears.
 > For bulletproof online play, self-host [peerjs-server](https://github.com/peers/peerjs-server)
 > and point `net.js` at it.
 
@@ -77,6 +87,7 @@ GitHub Pages serves over HTTPS, which is what PeerJS's secure broker needs.
 doodle-telephone/
 ├── index.html      # all screens: home, lobby, handoff, task, waiting, reveal, vote, done
 ├── styles.css      # cute cartoon theme, glass UI, animated background
+├── serve.py        # no-cache local dev server
 └── js/
     ├── game.js     # pure chain engine: rotation, steps, submissions, votes
     ├── draw.js     # DrawPad: stroke capture, rendering, stroke-by-stroke replay

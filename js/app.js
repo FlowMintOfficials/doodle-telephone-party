@@ -18,6 +18,7 @@ const clone = (x) => JSON.parse(JSON.stringify(x));
 const TEXT_MS = 45000;
 const DRAW_MS = 75000;
 const DROP_GRACE_MS = 8000; // let a dropped player reconnect before answering for them
+const LOBBY_DROP_GRACE_MS = 5000;
 
 const G = {
   mode: null,           // 'pass' | 'host' | 'client'
@@ -110,25 +111,30 @@ $('#host-create').addEventListener('click', async () => {
   G.mode = 'host'; G.myIndex = 0; G.started = false;
   G.hostPlayers = [{ id: 'host', name }];
   G.peerIndex = new Map();
+  $('#host-create').disabled = true;
   try {
     G.host = await createHost({ onMessage: hostOnMessage, onLeave: hostOnLeave, onStatus: setNetStatus });
     showLobby(G.host.code, true);
   } catch {
+    G.mode = null;
     alert('Could not create a room. Please try again.');
+  } finally {
+    $('#host-create').disabled = false;
   }
 });
 
-function hostOnMessage(peerId, data) {
+function hostOnMessage(peerId, data, conn) {
   if (!data || typeof data !== 'object') return;
+  const reply = (msg) => G.host.sendTo(peerId, msg, conn);
   if (data.t === 'join') {
     const seat = data.pid ? G.hostPlayers.findIndex((p) => p.pid === data.pid) : -1;
-    if (seat > -1) return hostReadmit(peerId, seat);
-    if (G.started) return G.host.sendTo(peerId, { t: 'err', m: 'That game already started.' });
-    if (G.hostPlayers.length >= MAX_PLAYERS) return G.host.sendTo(peerId, { t: 'err', m: `Room is full (${MAX_PLAYERS} max).` });
+    if (seat > -1) return hostReadmit(peerId, seat, conn);
+    if (G.started) return reply({ t: 'err', m: 'That game already started.' });
+    if (G.hostPlayers.length >= MAX_PLAYERS) return reply({ t: 'err', m: `Room is full (${MAX_PLAYERS} max).` });
     const index = G.hostPlayers.length;
     G.hostPlayers.push({ id: peerId, pid: data.pid, name: (data.name || 'Player').slice(0, 12) });
     reindexPeers();
-    G.host.sendTo(peerId, { t: 'welcome', index, code: G.host.code });
+    reply({ t: 'welcome', index, code: G.host.code });
     broadcastLobby();
     showLobby(G.host.code, true);
   } else if (data.t === 'submit') {
@@ -150,12 +156,15 @@ function reindexPeers() {
 }
 
 /** A player who dropped is back on a fresh connection: rebind their seat and resync. */
-function hostReadmit(peerId, index) {
+function hostReadmit(peerId, index, conn) {
+  const prevId = G.hostPlayers[index].id;
   clearTimeout(G.dropTimers.get(index));
   G.dropTimers.delete(index);
+  clearTimeout(G.dropTimers.get(prevId));
+  G.dropTimers.delete(prevId);
   G.hostPlayers[index].id = peerId;
   reindexPeers();
-  G.host.sendTo(peerId, { t: 'welcome', index, code: G.host.code });
+  G.host.sendTo(peerId, { t: 'welcome', index, code: G.host.code }, conn);
 
   if (!G.started) {
     broadcastLobby();
@@ -164,7 +173,7 @@ function hostReadmit(peerId, index) {
   }
 
   const s = G.state;
-  G.host.sendTo(peerId, { t: 'begin', players: s.players, totalSteps: s.totalSteps });
+  G.host.sendTo(peerId, { t: 'begin', players: s.players, totalSteps: s.totalSteps }, conn);
 
   if (s.phase === 'work') {
     const chain = chainForPlayer(s, index, s.step);
@@ -173,26 +182,34 @@ function hostReadmit(peerId, index) {
         t: 'task', step: s.step, chain, kind: kindForStep(s.step),
         ms: Math.max(5000, G.stepEndsAt - Date.now()),
         prior: priorEntry(s, chain, s.step), total: s.totalSteps,
-      });
+      }, conn);
     } else {
-      G.host.sendTo(peerId, { t: 'progress', done: submittedCount(s, s.step), total: s.chains.length });
+      G.host.sendTo(peerId, { t: 'progress', done: submittedCount(s, s.step), total: s.chains.length }, conn);
     }
     return;
   }
 
-  G.host.sendTo(peerId, { t: 'album', album: clone(G.album) });
-  if (s.phase === 'vote') G.host.sendTo(peerId, { t: 'votestart' });
-  else G.host.sendTo(peerId, { t: 'revealAt', ...G.reveal });
+  G.host.sendTo(peerId, { t: 'album', album: clone(G.album) }, conn);
+  if (s.phase === 'vote') G.host.sendTo(peerId, { t: 'votestart' }, conn);
+  else G.host.sendTo(peerId, { t: 'revealAt', ...G.reveal }, conn);
 }
 
 function hostOnLeave(peerId) {
   const idx = G.peerIndex.get(peerId);
   if (idx == null) return;
   if (!G.started) {
-    G.hostPlayers.splice(idx, 1);
-    reindexPeers();
-    broadcastLobby();
-    showLobby(G.host.code, true);
+    // A reconnect often closes the old channel after the new one is up. Wait
+    // a beat so a blip doesn't kick them out of the lobby.
+    clearTimeout(G.dropTimers.get(peerId));
+    G.dropTimers.set(peerId, setTimeout(() => {
+      G.dropTimers.delete(peerId);
+      const i = G.hostPlayers.findIndex((p) => p.id === peerId);
+      if (i < 0 || G.started) return;
+      G.hostPlayers.splice(i, 1);
+      reindexPeers();
+      broadcastLobby();
+      showLobby(G.host.code, true);
+    }, LOBBY_DROP_GRACE_MS));
     return;
   }
 
@@ -283,16 +300,37 @@ $('#join-go').addEventListener('click', async () => {
   $('#join-err').textContent = '';
   $('#join-go').disabled = true;
   G.mode = 'client';
+  const hello = { t: 'join', name, pid: myPid() };
   try {
-    G.client = await createClient(code, { onMessage: clientOnMessage, onClose: onLinkLost, onStatus: setNetStatus });
-    G.client.identify({ t: 'join', name, pid: myPid() });
+    G.client = await createClient(code, {
+      hello,
+      onMessage: clientOnMessage,
+      onClose: onLinkLost,
+      onStatus: setNetStatus,
+    });
+    G.client.identify(hello);
     showLobby(code, false);
+    startHandshakeWatch(hello);
   } catch (e) {
     $('#join-err').textContent = e.message || 'Could not join.';
+    G.mode = null;
   } finally {
     $('#join-go').disabled = false;
   }
 });
+
+/** Keep poking the host with the join handshake until we get a seat. */
+function startHandshakeWatch(hello) {
+  stopHandshakeWatch();
+  G.handshakeTimer = setInterval(() => {
+    if (G.mode !== 'client' || G.myIndex != null) { stopHandshakeWatch(); return; }
+    G.client?.identify(hello);
+  }, 2000);
+}
+function stopHandshakeWatch() {
+  clearInterval(G.handshakeTimer);
+  G.handshakeTimer = null;
+}
 
 function clientOnMessage(data) {
   if (!data || typeof data !== 'object') return;
@@ -300,6 +338,7 @@ function clientOnMessage(data) {
     case 'welcome':
       G.myIndex = data.index;
       if (data.code) $('#lobby-code').textContent = data.code;
+      stopHandshakeWatch();
       break;
     case 'lobby': G.lobbyList = data.players; showLobby($('#lobby-code').textContent, false); break;
     case 'begin':
@@ -717,6 +756,7 @@ addEventListener('resize', () => {
 
 function goHome() {
   stopTimer();
+  stopHandshakeWatch();
   clearTimeout(G.stepTimer);
   G.dropTimers.forEach((t) => clearTimeout(t));
   try { G.host?.close(); } catch {}

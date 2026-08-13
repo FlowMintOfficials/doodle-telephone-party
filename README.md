@@ -3,7 +3,7 @@
 Write a sentence. Someone draws it. Someone else guesses the drawing without seeing
 the original. Repeat… then watch every chain fall apart together at the reveal.
 
-A party game for **3–8 friends** that runs entirely in the browser. No sign-up, no
+A party game for **2–8 friends** that runs entirely in the browser. No sign-up, no
 backend, no app install. Built with vanilla HTML/CSS/JS and
 [PeerJS](https://peerjs.com) for peer-to-peer multiplayer.
 

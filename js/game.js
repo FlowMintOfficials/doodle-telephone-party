@@ -10,7 +10,7 @@
  * player works on a different chain each round and never revisits their own.
  */
 
-export const MIN_PLAYERS = 3;
+export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 8;
 export const MAX_STEPS = 8;
 
